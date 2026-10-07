@@ -48,10 +48,11 @@ generation, no status widgets.
 - **`GET /catalog`** (management surface): upstreams (`prefix`, `slug`,
   `label`, enabled flags, `systemPromptNote`) each with `models[]` keyed by
   `upstreamModelId` and carrying `officialIn`/`officialOut` (decimal strings,
-  USD per Mtok), `asksIn`/`asksOut`, `supportsCache`, `cacheHitRate`,
-  `input_token_limit`-equivalent caps where present, and enabled/disabled
-  flags. The catalog entry for `(prefix, upstreamModelId)` is the join key for
-  combo members' `model` field.
+  USD per Mtok), `asksIn`/`asksOut`, `supportsCache`, `cacheHitRate`, and
+  enabled/disabled flags. **Not used by the extension**: it lacks the
+  capability fields (`reasoning_levels`, input/output limits, modality) the
+  mapping needs — those come from `GET /v1/models`, which carries the same
+  official rates in numeric form.
 - **Money**: USDC decimal strings on the management surface; inference reports
   per-request consumer cost as `usage.cost` in USD (OpenRouter convention),
   with a $0.00001 minimum charge on billed requests.
@@ -80,10 +81,14 @@ upstream-agnostic from the client's perspective.
 ### Catalog (`refreshModels`)
 
 `fetchComboCatalog({ signal, token })` makes two authenticated GETs (well
-under the 30/min management budget):
+under every rate budget):
 
-1. `GET /combos` — the account's combos, order preserved.
-2. `GET /catalog` — upstream → model metadata for member joins.
+1. `GET /combos` (management surface) — the account's combos, order preserved.
+2. `GET /v1/models` (inference surface) — per-model metadata used for member
+   joins: `reasoning_levels`, `input_token_limit`, `max_output_tokens`,
+   `modality`, and `pricing.official_in/out` (same official rates as the
+   management `/catalog` endpoint, in numeric form; `/catalog` itself is not
+   called — it lacks the capability fields the mapping needs).
 
 Each combo becomes exactly one `Model<"openai-completions">`:
 
@@ -91,15 +96,18 @@ Each combo becomes exactly one `Model<"openai-completions">`:
   not exposed).
 - `name` = combo `name` (fallback: slug when name is empty).
 - `reasoning` = any resolvable member advertises non-empty
-  `reasoning_levels`.
-- `contextWindow` = min of resolvable members' input limits; `maxTokens` =
-  min of their output limits. Omit (leave undefined) when no resolvable
-  member supplies the field rather than guessing a floor.
+  `reasoning_levels`; `thinkingLevelMap` maps pi's thinking levels onto the
+  advertised levels.
+- `contextWindow` = min of resolvable members' `input_token_limit`;
+  `maxTokens` = min of their `max_output_tokens`. pi-ai's `Model` type
+  requires both as numbers, so when no resolvable member supplies a field,
+  conservative fallback constants apply (`CONTEXT_WINDOW_FALLBACK = 128_000`,
+  `MAX_TOKENS_FALLBACK = 8_192`) rather than a guess at the model's ceiling.
 - `input` = `["text", "image"]` only when **every** resolvable member's
   `modality` includes image; otherwise `["text"]`. A combo is only as
   multimodal as its weakest member.
-- `cost` = per-direction min of resolvable members' `officialIn`/`officialOut`
-  from the catalog. This is a conservative estimate: InferHub bills consumer
+- `cost` = per-direction min of resolvable members' `pricing.official_in`/
+  `official_out`. This is a conservative estimate: InferHub bills consumer
   requests at a discount below official list, so real `usage.cost` will
   typically come in at or under this number. Never fabricate a cache-write
   price: `cacheRead`/`cacheWrite` = 0 unless the catalog supplies them.
@@ -109,12 +117,12 @@ Each combo becomes exactly one `Model<"openai-completions">`:
 - `supports_cache`: not forwarded as a Model field; pi's cache-warming knobs
   (`promptCache.short/long`) stay unset in v1.
 
-**Alias-member fallback:** alias members cannot be joined to the catalog.
+**Alias-member fallback:** alias members cannot be joined to `/v1/models`.
 They are skipped for pricing/feature derivation. If a combo's resolvable
 (model-kind) member set is empty, expose it with safe defaults: `input:
 ["text"]`, `reasoning: true` (aliases typically route to reasoning-capable
 models; a false negative would hide thinking levels, a false positive merely
-shows an inert knob), no cost, no context/maxTokens limits.
+shows an inert knob), no cost, and the conservative fallback limits.
 
 **Disabled/upstream-absent members:** catalog entries whose upstream is
 `upstreamDisabled` or missing still count for joins (the combo may still
