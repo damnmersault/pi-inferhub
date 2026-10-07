@@ -113,6 +113,7 @@ pi packs the extension from `package.json` `pi.extensions:
   `devDependencies` (with real version pins) for the repo's own
   tests/typecheck.
 
+
 - **TypeScript 6.0.3**: tsconfig MUST carry `types: ["node"]` — TS 6 dropped
   automatic `@types/*` inclusion; without it `node:module`/`fetch`/`AbortSignal`
   don't resolve and `tsc --noEmit` fails.
@@ -122,7 +123,7 @@ pi packs the extension from `package.json` `pi.extensions:
   payload keys pass through by default; do NOT add
   `additionalProperties: false` to wire schemas.
 - **Git signing**: fresh clones inherit `gpg.format=ssh` globally but need
-  `git config user.signingkey ~/.ssh/michaelmacleod.id_ecdsa.pub` locally
+  `git config user.signingkey ~/.ssh/signing-key.pub` locally
   before the first commit fails.
 - **pi-ai `AuthEvent`** is a union; non-info variants carry no `message`.
   Anything typing an interaction callback as `{type: string; message:
