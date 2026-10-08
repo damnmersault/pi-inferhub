@@ -34,6 +34,8 @@ export const CatalogModelSchema = Type.Object({
 		Type.Object({
 			official_in: Type.Number(),
 			official_out: Type.Number(),
+			min_ask_in: Type.Optional(Type.Number()),
+			min_ask_out: Type.Optional(Type.Number()),
 		}),
 	),
 });

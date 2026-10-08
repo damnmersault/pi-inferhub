@@ -55,7 +55,7 @@ export function registerInferhubProvider(pi: InferhubRegistrationPi): void {
 			const status = ctx.modelRegistry.getProviderAuthStatus(PROVIDER_NAME);
 			if (status?.configured) {
 				const source = status.label ? ` (${status.label})` : "";
-				ctx.ui.notify(`InferHub is configured${source}. Run /models to pick a combo.`, "info");
+				ctx.ui.notify(`InferHub is configured${source}. Run /model to pick a combo.`, "info");
 				return;
 			}
 			ctx.ui.notify(

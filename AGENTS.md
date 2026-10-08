@@ -100,9 +100,18 @@ npm pack --dry-run    # inspect package contents before publishing
 pi packs the extension from `package.json` `pi.extensions:
 ["./src/index.ts"]`. Local dev: `pi -e <repo path>`. Published install:
 `npm:pi-inferhub` in `~/.pi/agent/settings.json` packages (NOT yet
-published as of 2026-10-07 — v0.1.0).
+	published npm:pi-inferhub (v0.1.1).
 
 ## Environment gotchas (learned the hard way)
+
+- **Pi packages declare host modules as peerDependencies, never
+  dependencies**: `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`,
+  `typebox` (and pi-tui if used) go in `peerDependencies` with `"*"` ranges;
+  keep `dependencies` empty. Regular dependencies make pi's package installer
+  warn about duplicate host-module copies — extensions must bind to the
+  copies the pi host already loads. Mirror the same modules in
+  `devDependencies` (with real version pins) for the repo's own
+  tests/typecheck.
 
 - **TypeScript 6.0.3**: tsconfig MUST carry `types: ["node"]` — TS 6 dropped
   automatic `@types/*` inclusion; without it `node:module`/`fetch`/`AbortSignal`
