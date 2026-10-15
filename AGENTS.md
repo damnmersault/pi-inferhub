@@ -122,9 +122,6 @@ pi packs the extension from `package.json` `pi.extensions:
   error detail lives on `instancePath` (there is no `path` field). Extra
   payload keys pass through by default; do NOT add
   `additionalProperties: false` to wire schemas.
-- **Git signing**: fresh clones inherit `gpg.format=ssh` globally but need
-  `git config user.signingkey ~/.ssh/signing-key.pub` locally
-  before the first commit fails.
 - **pi-ai `AuthEvent`** is a union; non-info variants carry no `message`.
   Anything typing an interaction callback as `{type: string; message:
   string}` breaks under contravariance — use `{type: string; message?:
