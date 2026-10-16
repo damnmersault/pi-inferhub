@@ -7,8 +7,8 @@ import { INFERENCE_BASE_URL, MGMT_BASE_URL, PROVIDER_NAME } from "./inferhub.js"
 /** pi thinking levels, in ladder order; `off` is handled separately. */
 const PI_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ThinkingLevel[];
 
-const CONTEXT_WINDOW_FALLBACK = 128_000;
-const MAX_TOKENS_FALLBACK = 8_192;
+const CONTEXT_WINDOW_FALLBACK = 262_144;
+const MAX_TOKENS_FALLBACK = 131_072;
 
 export const MemberSchema = Type.Union([
 	Type.Object({ kind: Type.Literal("model"), model: Type.String() }),
@@ -24,8 +24,12 @@ export const ComboSchema = Type.Object({
 });
 export type Combo = Static<typeof ComboSchema>;
 
+/** Live-pinned 2026-10-15: bare (prefix-less) catalog rows are aliases served by
+ *  prefixed upstream rows — they carry owned_by "alias" and NO limits/pricing/
+ *  reasoning fields at all. Unknown extra fields pass validation regardless. */
 export const CatalogModelSchema = Type.Object({
 	id: Type.String(),
+	owned_by: Type.Optional(Type.String()),
 	modality: Type.Optional(Type.String()),
 	input_token_limit: Type.Optional(Type.Number()),
 	max_output_tokens: Type.Optional(Type.Number()),
@@ -47,6 +51,10 @@ export type CatalogModel = Static<typeof CatalogModelSchema>;
  * validation (no additionalProperties restrictions).
  */
 const CombosEnvelope = Type.Array(ComboSchema);
+/** Bare (prefix-less) alias row shape observed live 2026-10-15:
+ *  {id, object:"model", created, owned_by:"alias", supports_cache} — no limits,
+ *  pricing, modality, or reasoning fields at all. Prefixed servings of the same
+ *  model carry the data; catalog.ts resolves aliases through them (sibling join). */
 const ModelsEnvelope = Type.Object({ data: Type.Array(CatalogModelSchema) });
 
 const CombosValidator = Compile(CombosEnvelope);
@@ -71,18 +79,29 @@ export function combosToModels(
 	catalogModels: CatalogModel[],
 ): Model<"openai-completions">[] {
 	const catalogById = new Map(catalogModels.map((model) => [model.id, model]));
-	return combos.map((combo) => comboToModel(combo, catalogById));
+	return combos.map((combo) => comboToModel(combo, catalogById, catalogModels));
 }
 
 function comboToModel(
 	combo: Combo,
 	catalogById: Map<string, CatalogModel>,
+	catalogModels: CatalogModel[],
 ): Model<"openai-completions"> {
+	// Alias rows (`owned_by: "alias"`, no data) and alias-kind members resolve
+	// through prefixed sibling servings of the same model name; min-of over the
+	// siblings bounds the combo exactly like directly-joined members.
 	const resolvable: CatalogModel[] = [];
 	for (const member of combo.members) {
-		if (member.kind !== "model") continue;
-		const entry = catalogById.get(member.model);
-		if (entry !== undefined) resolvable.push(entry);
+		const name = member.kind === "model" ? member.model : member.alias;
+		const entry = member.kind === "model" ? catalogById.get(member.model) : undefined;
+		if (entry !== undefined && entry.owned_by !== "alias") {
+			resolvable.push(entry);
+			continue;
+		}
+		for (const sibling of catalogModels) {
+			if (sibling.owned_by === "alias") continue;
+			if (sibling.id.endsWith(`/${name}`)) resolvable.push(sibling);
+		}
 	}
 
 	// Alias-only / all-missed-join combos reason optimistically: a false

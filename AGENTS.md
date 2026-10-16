@@ -59,18 +59,21 @@ upstream quirk.
    members' `official` rates (conservative upper bound — InferHub bills
    discounts below official). `cost.cacheRead/cacheWrite` = 0 always —
    InferHub's /v1/models pricing carries no cache fields; never fabricate.
-3. **Fallback constants**: `CONTEXT_WINDOW_FALLBACK = 128_000`,
-   `MAX_TOKENS_FALLBACK = 8_192` — used when no resolvable member supplies
-   the field. pi-ai's `Model` type requires both as numbers; never guess a
-   model's ceiling other than via these constants.
+3. **Fallback constants**: `CONTEXT_WINDOW_FALLBACK = 262_144`,
+   `MAX_TOKENS_FALLBACK = 131_072` — used when no resolvable member supplies
+   the field (last resort after the alias sibling join; see 5). pi-ai's
+   `Model` type requires both as numbers; never guess a model's ceiling
+   other than via these constants.
 4. **Image rule**: `input: ["text","image"]` only when ≥1 resolvable member
    AND every resolvable member's `modality` includes `image`. Understating
    input is acceptable; overstating sends requests the upstream rejects.
-5. **Alias-member fallback**: empty resolvable set (alias-only combos, or
-   all member joins missed) → `input:["text"]`, `reasoning:true`, zero
-   cost, fallback limits. `reasoning:true` is deliberate: a false negative
-   hides thinking levels (the worse error); a false positive shows an inert
-   knob.
+5. **Alias-member fallback**: bare alias rows (`owned_by: "alias"`, no
+   data — observed live 2026-10-15) and alias-kind members first resolve
+   through prefixed sibling servings of the same model name (`<prefix>/<name>`
+   rows in the /v1/models catalog, min-of applies). Only when no sibling
+   carries data either → `input:["text"]`, `reasoning:true`, zero cost,
+   fallback limits. `reasoning:true` is deliberate: a false negative hides
+   thinking levels (the worse error); a false positive shows an inert knob.
 6. **thinkingLevelMap**: built from the union of resolvable members'
    `reasoning_levels`; each pi level (`minimal|low|medium|high|xhigh|max`)
    maps to itself when advertised, else `null`; `off:"off"`. Set only when
