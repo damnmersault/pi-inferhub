@@ -4,6 +4,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
 import { inferhubApiKeyAuth, loginInferhub } from "./auth.js";
 import { fetchComboCatalog } from "./catalog.js";
+import { type InferhubConfig, loadInferhubConfig } from "./config.js";
 import { INFERENCE_BASE_URL, PROVIDER_DISPLAY_NAME, PROVIDER_NAME } from "./inferhub.js";
 
 /**
@@ -17,7 +18,13 @@ export interface InferhubRegistrationPi {
 	registerCommand(name: string, options: { description?: string; handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> }): void;
 }
 
-function inferhubProvider(): Provider<"openai-completions"> {
+export interface InferhubRegistrationOptions {
+	/** Config loader seam; production reads `<agentDir>/pi-inferhub.json`. */
+	loadConfig?: () => InferhubConfig;
+}
+
+function inferhubProvider(options: InferhubRegistrationOptions = {}): Provider<"openai-completions"> {
+	const loadConfig = options.loadConfig ?? (() => loadInferhubConfig());
 	return createProvider({
 		id: PROVIDER_NAME,
 		name: PROVIDER_DISPLAY_NAME,
@@ -36,15 +43,15 @@ function inferhubProvider(): Provider<"openai-completions"> {
 			const credential = context.credential;
 			const token = credential?.type === "api_key" ? credential.key : undefined;
 			if (!token) return [];
-			return fetchComboCatalog(token, context.signal);
+			return fetchComboCatalog(token, context.signal, { publishUpstream: loadConfig().publishUpstream });
 		},
 		api: openAICompletionsApi(),
 	});
 }
 
 /** Register the InferHub provider and its companion command. */
-export function registerInferhubProvider(pi: InferhubRegistrationPi): void {
-	pi.registerProvider(inferhubProvider());
+export function registerInferhubProvider(pi: InferhubRegistrationPi, options?: InferhubRegistrationOptions): void {
+	pi.registerProvider(inferhubProvider(options));
 
 	// pi's registerCommand takes a single command name; `/login inferhub` is
 	// provided by pi's auth system through the apiKey login wired above. This

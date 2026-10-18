@@ -1,9 +1,13 @@
 # pi-inferhub
 
 pi provider extension exposing the user's InferHub (https://inferhub.dev)
-**combos** as selectable chat models. Combos are the product: the extension
-never surfaces `prefix/model` upstream ids, bare aliases, `free/` tier
-models, or images/video generation. Combos are `combo/<slug>` models routed
+**combos** as selectable chat models. Combos are the product: by default the
+extension never surfaces `prefix/model` upstream ids, bare aliases, `free/`
+tier models, or images/video generation. `publishUpstream` (config file or
+`INFERHUB_PUBLISH_UPSTREAM`) opts into publishing the upstream catalog as
+direct-selectable entries — an explicit operator decision, and even then
+alias rows, `free/` tiers, and image/video generation stay excluded. Combos
+are `combo/<slug>` models routed
 through InferHub's OpenAI-compatible inference surface; all failover,
 serialization, and selection happens server-side.
 
@@ -12,14 +16,17 @@ Plan: `docs/superpowers/plans/2026-10-06-inferhub-provider.md`
 
 ## Architecture
 
-Four modules, acyclic, one-directional:
+Six modules, acyclic, one-directional:
 
 ```
 src/inferhub.ts   constants only — PROVIDER_NAME="inferhub", PROVIDER_DISPLAY_NAME="InferHub",
                   INFERENCE_BASE_URL="https://api.inferhub.dev/v1", MGMT_BASE_URL="https://inferhub.dev/api"
 src/http.ts    ← transport only — fetchJson (Bearer GET + typebox validation), InferhubHttpError{status,code,message}
+src/config.ts  ← optional <agentDir>/pi-inferhub.json (publishUpstream) + INFERHUB_PUBLISH_UPSTREAM env;
+                  never throws on file content, reports issues[]
 src/auth.ts    ← loginInferhub (prompt → validate GET /me → store), inferhubApiKeyAuth (envApiKeyAuth)
-src/catalog.ts ← fetchComboCatalog (Promise.all of the two GETs), pure combosToModels for tests
+src/catalog.ts ← fetchComboCatalog (Promise.all of the two GETs), pure combosToModels /
+                  catalogToModels / shared buildModel for tests
 src/index.ts   ← default extension factory: createProvider registration + inferhub-login signpost command
 ```
 
@@ -61,8 +68,9 @@ upstream quirk.
    InferHub's /v1/models pricing carries no cache fields; never fabricate.
 3. **Fallback constants**: `CONTEXT_WINDOW_FALLBACK = 262_144`,
    `MAX_TOKENS_FALLBACK = 131_072` — used when no resolvable member supplies
-   the field (last resort after the alias sibling join; see 5). pi-ai's
-   `Model` type requires both as numbers; never guess a model's ceiling
+   the field (last resort after the alias sibling join; see 5). A limit of `0`
+   counts as missing data (`minPositiveOf`); a price of `0` is a real price.
+   pi-ai's `Model` type requires both as numbers; never guess a model's ceiling
    other than via these constants.
 4. **Image rule**: `input: ["text","image"]` only when ≥1 resolvable member
    AND every resolvable member's `modality` includes `image`. Understating
@@ -70,15 +78,22 @@ upstream quirk.
 5. **Alias-member fallback**: bare alias rows (`owned_by: "alias"`, no
    data — observed live 2026-10-15) and alias-kind members first resolve
    through prefixed sibling servings of the same model name (`<prefix>/<name>`
-   rows in the /v1/models catalog, min-of applies). Only when no sibling
-   carries data either → `input:["text"]`, `reasoning:true`, zero cost,
+   rows in the /v1/models catalog, min-of applies). Exact suffix match wins;
+   when it finds nothing, the normalized last segment
+   (`cp/cline-pass/Kimi-K3` → `kimik3`) is the recovery path — live combos
+   reference multi-segment prefixes that have no exact serving (2026-10-18).
+   Only when neither resolves → `input:["text"]`, `reasoning:true`, zero cost,
    fallback limits. `reasoning:true` is deliberate: a false negative hides
    thinking levels (the worse error); a false positive shows an inert knob.
+   That optimism applies to EVERY combo, including level-less resolved
+   members — live-verified 2026-10-18 on combo/deepseek-v4-pro, which
+   advertises no levels yet honors `reasoning_effort` (84 reasoning tokens at
+   high, 0 at off).
 6. **thinkingLevelMap**: built from the union of resolvable members'
    `reasoning_levels`; each pi level (`minimal|low|medium|high|xhigh|max`)
-   maps to itself when advertised, else `null`; `off:"off"`. Set only when
-   `reasoning` is true. Alias-only/level-less combos OMIT the map entirely —
-   an all-null map would hide every selectable level.
+   maps to itself when advertised, else `null`; `off:"off"`. Alias-only /
+   level-less combos OMIT the map entirely — an all-null map would hide every
+   selectable level.
 7. **No key leakage**: the API key appears ONLY in the Authorization header
    and pi's credential store (`auth.json` via pi's own store). Never log,
    print, or persist it anywhere else. Tests inject fetch mocks; a test
@@ -91,19 +106,42 @@ upstream quirk.
 9. **No cross-run catalog persistence**: refresh is always live. A stale
    combo snapshot silently serving the wrong routing is worse than an
    explicit refresh.
+10. **`compat.maxTokensField = "max_tokens"`**: InferHub ignores
+    `max_completion_tokens` (live-verified 2026-10-18: a 20-token cap sent
+    that way produced 107 completion tokens; the same cap as `max_tokens`
+    stopped at 20). pi-ai's provider auto-detection does not cover inferhub,
+    so the field is pinned explicitly on every mapped model — without it
+    every advertised `maxTokens` is silently unenforced.
 
 ## Commands
 
 ```
-npx vitest run        # full suite (18 tests, <2s)
+npx vitest run        # full suite (33 tests, <1s)
 npx tsc --noEmit      # typecheck
 npm pack --dry-run    # inspect package contents before publishing
 ```
 
 pi packs the extension from `package.json` `pi.extensions:
 ["./src/index.ts"]`. Local dev: `pi -e <repo path>`. Published install:
-`npm:pi-inferhub` in `~/.pi/agent/settings.json` packages (NOT yet
-	published npm:pi-inferhub (v0.1.1).
+`npm:pi-inferhub` in `~/.pi/agent/settings.json` packages.
+
+## Configuration
+
+Optional `<agentDir>/pi-inferhub.json` (`agentDir` = `PI_AGENT_DIR` or
+`~/.pi/agent`). Missing file = defaults; malformed file = defaults + an issue
+in `loadInferhubConfig().issues`; unknown keys ignored; wrong types reported
+and the default kept. Never fatal.
+
+```json
+{ "publishUpstream": true }
+```
+
+- `publishUpstream` (default `false`): also publish every chat model from
+  `/v1/models` as a direct-selectable `prefix/model` entry, after the
+  `combo/<slug>` models. Alias rows, image/video outputs, `free/` tiers, and
+  empty model segments are always excluded.
+- `INFERHUB_PUBLISH_UPSTREAM` overrides the file in both directions
+  (`1/true/yes/on` vs `0/false/no/off`).
 
 ## Environment gotchas (learned the hard way)
 
@@ -138,8 +176,9 @@ pi packs the extension from `package.json` `pi.extensions:
 
 - Typebox schemas live at module scope (`Compile(Type.Object({...}))`).
 - Tabs, ESM with `.js` import specifiers, single-responsibility modules.
-- Tests verify real behavior through public seams (`combosToModels` pure
-  function; real `createProvider` refresh path in test/index.test.ts with
+- Tests verify real behavior through public seams (`combosToModels` /
+  `catalogToModels` pure functions; `loadInferhubConfig` with a temp agent
+  dir; real `createProvider` refresh path in test/index.test.ts with
   injected `fetchImpl`). No seams into internals.
 - Deleting a brief-verbatim test line, or "fixing" a failing test by editing
   the test to fit the code rather than the contract, is not allowed without

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CatalogModel, Combo } from "../src/catalog.js";
-import { combosToModels } from "../src/catalog.js";
+import { combosToModels, catalogToModels } from "../src/catalog.js";
 import { INFERENCE_BASE_URL, PROVIDER_NAME } from "../src/inferhub.js";
 
 const base = {
@@ -23,6 +23,52 @@ const combo = (members: Combo["members"], overrides: Partial<Combo> = {}): Combo
 /** Bare alias row shape observed live 2026-10-15: id without prefix, owned_by "alias",
  *  no limits/pricing/reasoning fields at all. */
 const aliasRow = (name: string): CatalogModel => ({ id: name, owned_by: "alias" });
+
+describe("catalogToModels", () => {
+	it("maps chat rows and skips alias rows, image/video outputs, free tiers, and empty ids", () => {
+		const rows: CatalogModel[] = [
+			{
+				id: "zai/glm-5.3",
+				owned_by: "zai",
+				modality: "text,image",
+				input_token_limit: 200_000,
+				max_output_tokens: 32_000,
+				reasoning_levels: ["low", "high"],
+				upstream_label: "GLM 5.3",
+				pricing: { official_in: 3, official_out: 15 },
+			},
+			{ id: "glm-5.3", owned_by: "alias" },
+			{ id: "cx/gpt-image-2-codex", owned_by: "cx", output_modality: "image", modality: "text" },
+			{ id: "vid/gen", owned_by: "vid", output_modality: "video", modality: "text" },
+			{ id: "free/promo", owned_by: "free", modality: "text" },
+			{ id: "cc/", owned_by: "cc", modality: "text" },
+		];
+		const models = catalogToModels(rows);
+		expect(models.map((m) => m.id)).toEqual(["zai/glm-5.3"]);
+		const [m] = models;
+		expect(m.name).toBe("GLM 5.3");
+		expect(m.provider).toBe(PROVIDER_NAME);
+		expect(m.input).toEqual(["text", "image"]);
+		expect(m.reasoning).toBe(true);
+		expect(m.thinkingLevelMap).toMatchObject({ low: "low", high: "high" });
+		expect(m.contextWindow).toBe(200_000);
+		expect(m.maxTokens).toBe(32_000);
+		expect(m.cost).toEqual({ input: 3, output: 15, cacheRead: 0, cacheWrite: 0 });
+		expect(m.compat).toMatchObject({ maxTokensField: "max_tokens" });
+	});
+
+	it("uses the id as name, falls back on missing or zero limits, and omits the map without levels", () => {
+		const [m] = catalogToModels([
+			{ id: "x/plain", owned_by: "x", modality: "text", input_token_limit: 0, max_output_tokens: 0 },
+		]);
+		expect(m.name).toBe("x/plain");
+		expect(m.input).toEqual(["text"]);
+		expect(m.contextWindow).toBe(262_144);
+		expect(m.maxTokens).toBe(131_072);
+		expect(m.thinkingLevelMap).toBeUndefined();
+		expect(m.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+	});
+});
 
 describe("combosToModels", () => {
 	it("maps id, name, provider, baseUrl, api", () => {
@@ -115,9 +161,69 @@ describe("combosToModels", () => {
 		expect(m.maxTokens).toBe(32_000);
 	});
 
-	it("reasoning false when no member advertises levels", () => {
+	it("pins max_tokens compat so advertised output limits are enforced upstream", () => {
+		// InferHub ignores max_completion_tokens (verified live 2026-10-18: a
+		// 20-token cap sent as max_completion_tokens produced 107 completion
+		// tokens; the same cap sent as max_tokens stopped at 20).
+		const [m] = combosToModels([combo([{ kind: "model", model: "croc/glm-5.3" }])], catalog);
+		expect(m.compat).toMatchObject({ maxTokensField: "max_tokens" });
+	});
+
+	it("resolves multi-segment prefixes through normalized sibling names", () => {
+		// Live shape 2026-10-18: combos reference cp/cline-pass/<model> and
+		// cb/<model> rows that have no exact "<prefix>/<name>" serving; the same
+		// model is served under a different prefix. Exact-suffix join misses it.
+		const multiPrefix: CatalogModel[] = [
+			{ id: "zai/glm-5.3", ...base },
+			{ id: "cmc/moonshotai/Kimi-K3", ...base, input_token_limit: 500_000, max_output_tokens: 64_000 },
+		];
+		const [fromModel, fromAlias] = combosToModels([
+			combo([{ kind: "model", model: "cp/cline-pass/glm-5.3" }], { slug: "a" }),
+			combo([{ kind: "alias", alias: "kimi-k3" }], { slug: "b" }),
+		], multiPrefix);
+		expect(fromModel.contextWindow).toBe(200_000); // zai/glm-5.3, not the 262_144 fallback
+		expect(fromModel.maxTokens).toBe(32_000);
+		expect(fromAlias.contextWindow).toBe(500_000); // cmc/moonshotai/Kimi-K3
+		expect(fromAlias.maxTokens).toBe(64_000);
+	});
+
+	it("prefers exact suffix servings over normalized matches", () => {
+		// Normalization must be a recovery path, not a wider net: an exact sibling
+		// set bounds the combo; same-named rows under other prefixes must not join.
+		const exactFirst: CatalogModel[] = [
+			{ id: "croc/glm-5.3", ...base },
+			{ id: "other/glm-5.3", ...base, input_token_limit: 1_000_000, max_output_tokens: 128_000 },
+		];
+		const [m] = combosToModels([combo([{ kind: "alias", alias: "glm-5.3" }])], exactFirst);
+		expect(m.contextWindow).toBe(200_000);
+		expect(m.maxTokens).toBe(32_000);
+	});
+
+	it("treats zero limits as missing data while keeping zero prices real", () => {
+		// A 0 limit is absent data (a real model always accepts some context);
+		// a 0 price is a real price and must survive min-of untouched.
+		const zero: CatalogModel = {
+			id: "z/model",
+			modality: "text",
+			input_token_limit: 0,
+			max_output_tokens: 0,
+			pricing: { official_in: 0, official_out: 1.5 },
+		};
+		const [m] = combosToModels([combo([{ kind: "model", model: "z/model" }])], [zero]);
+		expect(m.contextWindow).toBe(262_144);
+		expect(m.maxTokens).toBe(131_072);
+		expect(m.cost).toEqual({ input: 0, output: 1.5, cacheRead: 0, cacheWrite: 0 });
+	});
+
+	it("reasons optimistically when resolved members advertise no levels, omitting the map", () => {
+		// Contract change 2026-10-18 (invariant 5 rationale extended to resolved
+		// members): a false negative hides the thinking knob — the worse error —
+		// while a false positive only shows an inert one. Live evidence:
+		// combo/deepseek-v4-pro advertises no levels on any member yet honors
+		// reasoning_effort (84 reasoning tokens at high, 0 at off).
 		const noLevels: CatalogModel = { id: "x/plain", modality: "text" };
 		const [m] = combosToModels([combo([{ kind: "model", model: "x/plain" }])], [noLevels]);
-		expect(m.reasoning).toBe(false);
+		expect(m.reasoning).toBe(true);
+		expect(m.thinkingLevelMap).toBeUndefined(); // an all-null map would hide every level
 	});
 });

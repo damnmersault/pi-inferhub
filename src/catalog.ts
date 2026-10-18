@@ -31,6 +31,8 @@ export const CatalogModelSchema = Type.Object({
 	id: Type.String(),
 	owned_by: Type.Optional(Type.String()),
 	modality: Type.Optional(Type.String()),
+	output_modality: Type.Optional(Type.String()),
+	upstream_label: Type.Optional(Type.String()),
 	input_token_limit: Type.Optional(Type.Number()),
 	max_output_tokens: Type.Optional(Type.Number()),
 	reasoning_levels: Type.Optional(Type.Array(Type.String())),
@@ -60,17 +62,25 @@ const ModelsEnvelope = Type.Object({ data: Type.Array(CatalogModelSchema) });
 const CombosValidator = Compile(CombosEnvelope);
 const ModelsValidator = Compile(ModelsEnvelope);
 
+export interface FetchCatalogOptions extends FetchJsonOptions {
+	/** Also publish direct-selectable upstream models from /v1/models. */
+	publishUpstream?: boolean;
+}
+
 /** GET /combos + GET /v1/models (independent), then map combos to pi models. */
 export async function fetchComboCatalog(
 	token: string,
 	signal?: AbortSignal,
-	opts?: FetchJsonOptions,
+	opts?: FetchCatalogOptions,
 ): Promise<Model<"openai-completions">[]> {
 	const [combos, models] = await Promise.all([
 		fetchJson<Combo[]>(`${MGMT_BASE_URL}/combos`, token, CombosValidator, signal, opts),
 		fetchJson<Static<typeof ModelsEnvelope>>(`${INFERENCE_BASE_URL}/models`, token, ModelsValidator, signal, opts),
 	]);
-	return combosToModels(combos, models.data);
+	const comboModels = combosToModels(combos, models.data);
+	// Combos are the product: they stay first. The upstream catalog only widens
+	// the list when the operator opts in.
+	return opts?.publishUpstream ? [...comboModels, ...catalogToModels(models.data)] : comboModels;
 }
 
 /** Pure combo → Model mapping; output order follows `combos` order. */
@@ -90,6 +100,12 @@ function comboToModel(
 	// Alias rows (`owned_by: "alias"`, no data) and alias-kind members resolve
 	// through prefixed sibling servings of the same model name; min-of over the
 	// siblings bounds the combo exactly like directly-joined members.
+	//
+	// Live shape 2026-10-18: combos reference multi-segment prefixes
+	// (cp/cline-pass/<model>, cp/zai/<model>) that have no exact serving, while
+	// the same model is served under another prefix (zai/<model>,
+	// cmc/moonshotai/<model>). Exact suffix matches win; the normalized
+	// last-segment name is the recovery path, never a wider net.
 	const resolvable: CatalogModel[] = [];
 	for (const member of combo.members) {
 		const name = member.kind === "model" ? member.model : member.alias;
@@ -98,27 +114,73 @@ function comboToModel(
 			resolvable.push(entry);
 			continue;
 		}
-		for (const sibling of catalogModels) {
-			if (sibling.owned_by === "alias") continue;
-			if (sibling.id.endsWith(`/${name}`)) resolvable.push(sibling);
+		const exact = catalogModels.filter(
+			(sibling) => sibling.owned_by !== "alias" && sibling.id.endsWith(`/${name}`),
+		);
+		if (exact.length > 0) {
+			resolvable.push(...exact);
+			continue;
+		}
+		const normalized = normalizeModelName(name);
+		if (normalized.length > 0) {
+			resolvable.push(
+				...catalogModels.filter(
+					(sibling) => sibling.owned_by !== "alias" && normalizeModelName(sibling.id) === normalized,
+				),
+			);
 		}
 	}
 
-	// Alias-only / all-missed-join combos reason optimistically: a false
-	// negative hides thinking levels, a false positive shows an inert knob.
+	// Optimistic by design: a false negative hides thinking levels (the worse
+	// error); a false positive shows an inert knob. Applies to every combo,
+	// including level-less resolved members (live-verified 2026-10-18 on
+	// combo/deepseek-v4-pro: no advertised levels, honors reasoning_effort).
+	const name = combo.name.trim().length > 0 ? combo.name : combo.slug;
+	return buildModel(`combo/${combo.slug}`, name, resolvable);
+}
+
+/**
+ * Direct-selectable upstream models from `/v1/models`, in catalog order.
+ * Skipped: alias rows (information-free duplicates of a prefixed serving),
+ * image-output rows (not chat models), and blank ids (live shape `cc/`).
+ */
+export function catalogToModels(catalogModels: CatalogModel[]): Model<"openai-completions">[] {
+	return catalogModels
+		.filter(
+			(row) =>
+				row.owned_by !== "alias" &&
+				// AGENTS.md product rule: never surface image/video generation or
+				// `free/` tier models, even when the upstream catalog is published.
+				row.output_modality !== "image" &&
+				row.output_modality !== "video" &&
+				!row.id.startsWith("free/") &&
+				// Live shape `cc/`: prefix with an empty model segment — not selectable.
+				(row.id.split("/").pop() ?? "").trim().length > 0,
+		)
+		.map((row) => {
+			const label = row.upstream_label?.trim();
+			return buildModel(row.id, label && label.length > 0 ? label : row.id, [row]);
+		});
+}
+
+/** Shared pi-model construction for combo and direct-catalog entries. */
+function buildModel(
+	id: string,
+	name: string,
+	sources: CatalogModel[],
+): Model<"openai-completions"> {
 	const advertised = new Set<string>();
-	for (const model of resolvable) {
+	for (const model of sources) {
 		for (const level of model.reasoning_levels ?? []) advertised.add(level);
 	}
-	const reasoning = resolvable.length === 0 || advertised.size > 0;
 
-	const image = resolvable.length > 0 && resolvable.every((model) => (model.modality ?? "").includes("image"));
+	const image = sources.length > 0 && sources.every((model) => (model.modality ?? "").includes("image"));
 
-	const priced = resolvable.flatMap((model) => (model.pricing ? [model.pricing] : []));
+	const priced = sources.flatMap((model) => (model.pricing ? [model.pricing] : []));
 
 	const model: Model<"openai-completions"> = {
-		id: `combo/${combo.slug}`,
-		name: combo.name.trim().length > 0 ? combo.name : combo.slug,
+		id,
+		name,
 		api: "openai-completions",
 		provider: PROVIDER_NAME,
 		baseUrl: INFERENCE_BASE_URL,
@@ -129,15 +191,25 @@ function comboToModel(
 			cacheRead: 0,
 			cacheWrite: 0,
 		},
-		reasoning,
-		contextWindow: minOf(resolvable.map((m) => m.input_token_limit)) ?? CONTEXT_WINDOW_FALLBACK,
-		maxTokens: minOf(resolvable.map((m) => m.max_output_tokens)) ?? MAX_TOKENS_FALLBACK,
+		reasoning: true,
+		contextWindow: minPositiveOf(sources.map((source) => source.input_token_limit)) ?? CONTEXT_WINDOW_FALLBACK,
+		maxTokens: minPositiveOf(sources.map((source) => source.max_output_tokens)) ?? MAX_TOKENS_FALLBACK,
+		// InferHub's [OI]-compatible surface ignores max_completion_tokens (verified
+		// live 2026-10-18: a 20-token cap sent that way produced 107 tokens; the
+		// same cap as max_tokens stopped at 20). pi-ai auto-detects per-provider
+		// and inferhub is not on its list, so pin the field explicitly.
+		compat: { maxTokensField: "max_tokens" },
 	};
-	// thinkingLevelMap: built only from an advertised union; an empty union
-	// (alias-only combos) omits the map so pi defaults keep thinking levels
-	// selectable — marking them all `null` would hide the knob entirely.
-	if (reasoning && advertised.size > 0) model.thinkingLevelMap = buildThinkingLevelMap(advertised);
+	// thinkingLevelMap: built only from an advertised union; a level-less union
+	// omits the map so pi defaults keep thinking levels selectable — marking
+	// them all `null` would hide the knob entirely.
+	if (advertised.size > 0) model.thinkingLevelMap = buildThinkingLevelMap(advertised);
 	return model;
+}
+
+/** Last path segment, lowercased, alphanumerics only: "cp/cline-pass/Kimi-K3" → "kimik3". */
+function normalizeModelName(id: string): string {
+	return (id.split("/").pop() ?? id).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 /** Each pi level maps to itself when the combo advertises it, else `null`. */
@@ -151,5 +223,11 @@ function buildThinkingLevelMap(advertised: ReadonlySet<string>): ThinkingLevelMa
 
 function minOf(values: Array<number | undefined>): number | undefined {
 	const present = values.filter((value): value is number => value !== undefined);
+	return present.length > 0 ? Math.min(...present) : undefined;
+}
+
+/** Limits: 0 (or non-finite) is missing data, never a real ceiling. Prices keep 0. */
+function minPositiveOf(values: Array<number | undefined>): number | undefined {
+	const present = values.filter((value): value is number => value !== undefined && Number.isFinite(value) && value > 0);
 	return present.length > 0 ? Math.min(...present) : undefined;
 }

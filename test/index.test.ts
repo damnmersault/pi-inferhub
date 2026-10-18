@@ -105,6 +105,17 @@ describe("registerInferhubProvider", () => {
 		expect(authHeaders).toEqual(["Bearer sk-test", "Bearer sk-test"]); // /combos + /v1/models
 	});
 
+	it("publishes the full upstream catalog when publishUpstream is configured", async () => {
+		const { pi, providers } = registrationHarness();
+		registerInferhubProvider(pi, { loadConfig: () => ({ publishUpstream: true, issues: [] }) });
+		stubCatalogFetch();
+		const { context, publications } = refreshContext();
+		await providers.get("inferhub")!.refreshModels!(context);
+		// Combos stay first; direct-selectable upstream rows follow.
+		expect(providers.get("inferhub")!.getModels().map((m) => m.id)).toEqual(["combo/test-combo", "croc/glm-5.3"]);
+		expect((publications.at(-1)?.persist?.models ?? []).map((m) => m.id)).toEqual(["combo/test-combo", "croc/glm-5.3"]);
+	});
+
 	it("refreshModels keeps the empty baseline without a credential (no network)", async () => {
 		const { pi, providers } = registrationHarness();
 		registerInferhubProvider(pi);
