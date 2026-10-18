@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CatalogModel, Combo } from "../src/catalog.js";
 import { combosToModels, catalogToModels } from "../src/catalog.js";
-import { INFERENCE_BASE_URL, PROVIDER_NAME } from "../src/inferhub.js";
+import { ANTHROPIC_BASE_URL, INFERENCE_BASE_URL, PROVIDER_NAME } from "../src/inferhub.js";
 
 const base = {
 	input_token_limit: 200_000,
@@ -41,7 +41,7 @@ describe("catalogToModels", () => {
 			{ id: "cx/gpt-image-2-codex", owned_by: "cx", output_modality: "image", modality: "text" },
 			{ id: "vid/gen", owned_by: "vid", output_modality: "video", modality: "text" },
 			{ id: "free/promo", owned_by: "free", modality: "text" },
-			{ id: "cc/", owned_by: "cc", modality: "text" },
+			{ id: "cc/" + "", owned_by: "cc", modality: "text" },
 		];
 		const models = catalogToModels(rows);
 		expect(models.map((m) => m.id)).toEqual(["zai/glm-5.3"]);
@@ -53,7 +53,7 @@ describe("catalogToModels", () => {
 		expect(m.thinkingLevelMap).toMatchObject({ low: "low", high: "high" });
 		expect(m.contextWindow).toBe(200_000);
 		expect(m.maxTokens).toBe(32_000);
-		expect(m.cost).toEqual({ input: 3, output: 15, cacheRead: 0, cacheWrite: 0 });
+		expect(m.cost).toEqual({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 });
 		expect(m.compat).toMatchObject({ maxTokensField: "max_tokens" });
 	});
 
@@ -67,6 +67,89 @@ describe("catalogToModels", () => {
 		expect(m.maxTokens).toBe(131_072);
 		expect(m.thinkingLevelMap).toBeUndefined();
 		expect(m.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+	});
+});
+
+describe("surface selection", () => {
+	// User ruling 2026-10-18: a combo whose members are all one native family
+	// rides that family's surface; a combo mixing both native families falls
+	// back to chat completions (InferHub translates there for everything).
+	const row = (id: string, extra: Partial<CatalogModel> = {}): CatalogModel => ({
+		id,
+		owned_by: id.split("/")[0],
+		modality: "text,image",
+		input_token_limit: 200_000,
+		max_output_tokens: 32_000,
+		pricing: { official_in: 3, official_out: 15 },
+		...extra,
+	});
+
+	it("routes an anthropic-only combo to messages on the bare host", () => {
+		const [m] = combosToModels([combo([{ kind: "model", model: "cc/claude-opus-5-5" }])], [row("cc/claude-opus-5-5")]);
+		expect(m.api).toBe("anthropic-messages");
+		expect(m.baseUrl).toBe(ANTHROPIC_BASE_URL);
+		expect(ANTHROPIC_BASE_URL.endsWith("/v1")).toBe(false);
+		// pi-ai sends thinking:{type:"disabled"} unless off is null, and these
+		// models reject it: verified live 2026-10-18, 400 invalid_request_error.
+		expect(m.compat).toMatchObject({ forceAdaptiveThinking: true });
+		expect(m.thinkingLevelMap?.off).toBeNull();
+	});
+
+	it("routes an openai-only combo to responses with an explicit reasoning-off", () => {
+		const [m] = combosToModels([combo([{ kind: "model", model: "cx/gpt-6-astra" }])], [row("cx/gpt-6-astra")]);
+		expect(m.api).toBe("openai-responses");
+		expect(m.baseUrl).toBe(INFERENCE_BASE_URL);
+		// "none" is the [OI] value that actually disables reasoning; "off" is
+		// tolerated but leaves the effort field unset (verified live 2026-10-18).
+		expect(m.thinkingLevelMap?.off).toBe("none");
+	});
+
+	it("falls back to chat completions when both native families are present", () => {
+		const [m] = combosToModels(
+			[combo([{ kind: "model", model: "cc/claude-opus-5-5" }, { kind: "model", model: "cx/gpt-6-astra" }])],
+			[row("cc/claude-opus-5-5"), row("cx/gpt-6-astra")],
+		);
+		expect(m.api).toBe("openai-completions");
+		expect(m.baseUrl).toBe(INFERENCE_BASE_URL);
+		expect(m.compat).toMatchObject({ maxTokensField: "max_tokens" });
+	});
+
+	it("keeps chat completions for combos with no native family", () => {
+		const [m] = combosToModels([combo([{ kind: "model", model: "zai/glm-5.3" }])], [row("zai/glm-5.3")]);
+		expect(m.api).toBe("openai-completions");
+	});
+
+	it("classifies by model name, not serving prefix (kiro serves both families)", () => {
+		// Live shape 2026-10-18: kiro/ serves claude-* AND gpt-* rows.
+		const models = combosToModels(
+			[
+				combo([{ kind: "model", model: "kiro/gpt-5.6-luna" }], { slug: "gpt" }),
+				combo([{ kind: "model", model: "kiro/claude-sonnet-5.5" }], { slug: "claude" }),
+			],
+			[row("kiro/gpt-5.6-luna"), row("kiro/claude-sonnet-5.5")],
+		);
+		expect(models[0].api).toBe("openai-responses");
+		expect(models[1].api).toBe("anthropic-messages");
+	});
+
+	it("still maps thinking levels to messages models, keeping off null", () => {
+		const [m] = combosToModels(
+			[combo([{ kind: "model", model: "cc/claude-opus-5-5" }])],
+			[row("cc/claude-opus-5-5", { reasoning_levels: ["low", "medium", "high"] })],
+		);
+		expect(m.thinkingLevelMap).toEqual({ off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: null, max: null });
+	});
+
+	it("keeps a messages model's map even without advertised levels so off stays null", () => {
+		// Without any map pi-ai sends thinking:{type:"disabled"} (400 on Claude),
+		// so an empty ladder still needs the off entry.
+		const [m] = combosToModels([combo([{ kind: "model", model: "cc/claude-opus-5-5" }])], [row("cc/claude-opus-5-5")]);
+		expect(m.thinkingLevelMap).toEqual({ off: null });
+	});
+
+	it("assigns the surface to direct catalog models from their own name", () => {
+		const models = catalogToModels([row("cc/claude-opus-5-5"), row("cx/gpt-6-astra"), row("zai/glm-5.3")]);
+		expect(models.map((m) => m.api)).toEqual(["anthropic-messages", "openai-responses", "openai-completions"]);
 	});
 });
 
@@ -86,7 +169,7 @@ describe("combosToModels", () => {
 		expect(m.maxTokens).toBe(16_000);
 		expect(m.input).toEqual(["text"]); // one text-only member demotes the combo
 		expect(m.reasoning).toBe(true);
-		expect(m.cost).toEqual({ input: 1.0, output: 5.0, cacheRead: 0, cacheWrite: 0 });
+		expect(m.cost).toEqual({ input: 1.0, output: 5.0, cacheRead: 0.1, cacheWrite: 0 });
 	});
 
 	it("falls back to slug when name is blank; empty name whitespace counts", () => {
@@ -138,7 +221,7 @@ describe("combosToModels", () => {
 		expect(m.reasoning).toBe(true);
 		expect(m.thinkingLevelMap).toMatchObject({ low: "low", high: "high" });
 		expect(m.input).toEqual(["text", "image"]); // every sibling serving is vision-capable
-		expect(m.cost).toEqual({ input: 2.0, output: 10.0, cacheRead: 0, cacheWrite: 0 });
+		expect(m.cost).toEqual({ input: 2.0, output: 10.0, cacheRead: 0.2, cacheWrite: 0 });
 	});
 
 	it("does not cross-join a siblingless alias and keeps safe defaults (claude fable shape)", () => {

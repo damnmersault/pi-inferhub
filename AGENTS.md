@@ -20,13 +20,14 @@ Six modules, acyclic, one-directional:
 
 ```
 src/inferhub.ts   constants only — PROVIDER_NAME="inferhub", PROVIDER_DISPLAY_NAME="InferHub",
-                  INFERENCE_BASE_URL="https://api.inferhub.dev/v1", MGMT_BASE_URL="https://inferhub.dev/api"
+                  INFERENCE_BASE_URL="https://api.inferhub.dev/v1",
+                  ANTHROPIC_BASE_URL="https://api.inferhub.dev" (no /v1), MGMT_BASE_URL="https://inferhub.dev/api"
 src/http.ts    ← transport only — fetchJson (Bearer GET + typebox validation), InferhubHttpError{status,code,message}
 src/config.ts  ← optional <agentDir>/pi-inferhub.json (publishUpstream) + INFERHUB_PUBLISH_UPSTREAM env;
                   never throws on file content, reports issues[]
 src/auth.ts    ← loginInferhub (prompt → validate GET /me → store), inferhubApiKeyAuth (envApiKeyAuth)
 src/catalog.ts ← fetchComboCatalog (Promise.all of the two GETs), pure combosToModels /
-                  catalogToModels / shared buildModel for tests
+                  catalogToModels / nativeFamily / selectSurface / shared buildModel for tests
 src/index.ts   ← default extension factory: createProvider registration + inferhub-login signpost command
 ```
 
@@ -64,8 +65,11 @@ upstream quirk.
    `Model<"openai-completions">` fields.
 2. **Cost honesty**: `cost.input/output` = per-direction MIN of resolvable
    members' `official` rates (conservative upper bound — InferHub bills
-   discounts below official). `cost.cacheRead/cacheWrite` = 0 always —
-   InferHub's /v1/models pricing carries no cache fields; never fabricate.
+   discounts below official). `cost.cacheRead` = `0.1 × cost.input` — the
+   owner-confirmed marketplace rule (2026-10-18), matching observed billing
+   (a cached 1218-token prefix cut a request's cost ~16x). `cost.cacheWrite`
+   = 0: InferHub publishes no write rate and pi-ai already prices 1h writes
+   at 2x input on its own; never fabricate a rate.
 3. **Fallback constants**: `CONTEXT_WINDOW_FALLBACK = 262_144`,
    `MAX_TOKENS_FALLBACK = 131_072` — used when no resolvable member supplies
    the field (last resort after the alias sibling join; see 5). A limit of `0`
@@ -112,11 +116,27 @@ upstream quirk.
     stopped at 20). pi-ai's provider auto-detection does not cover inferhub,
     so the field is pinned explicitly on every mapped model — without it
     every advertised `maxTokens` is silently unenforced.
+11. **Surface selection** (user ruling 2026-10-18): each model carries its own
+    `api` and `baseUrl`, dispatched by pi-ai's `createProvider` api map.
+    Claude-only membership → `anthropic-messages` on the BARE host
+    (`ANTHROPIC_BASE_URL`, no `/v1`); GPT-only → `openai-responses` on
+    `INFERENCE_BASE_URL`; both families or neither → `openai-completions`.
+    Family is decided from the model NAME (last path segment), never the
+    serving prefix — `kiro/` serves both claude-* and gpt-* rows
+    (live-verified 2026-10-18). Mixed membership must NOT pick a native
+    surface: the members disagree about what "native" means.
+12. **Anthropic thinking compat**: `anthropic-messages` models carry
+    `compat.forceAdaptiveThinking: true` and `thinkingLevelMap.off = null`.
+    Without both, pi-ai sends `thinking:{type:"disabled"}` and these models
+    return 400 (live-verified). `off: null` means pi cannot offer "off" for
+    Claude combos — that is the required trade-off, not a bug. On
+    `openai-responses` models `off` maps to `"none"` (the [OI] value that
+    actually disables reasoning); on completions it stays `"off"`.
 
 ## Commands
 
 ```
-npx vitest run        # full suite (33 tests, <1s)
+npx vitest run        # full suite (43 tests, <1s)
 npx tsc --noEmit      # typecheck
 npm pack --dry-run    # inspect package contents before publishing
 ```

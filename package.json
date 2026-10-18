@@ -1,6 +1,6 @@
 {
 	"name": "pi-inferhub",
-	"version": "0.3.0",
+	"version": "0.4.0",
 	"description": "Pi extension for the InferHub inference provider",
 	"license": "MIT",
 	"keywords": [

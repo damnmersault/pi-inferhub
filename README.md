@@ -98,9 +98,14 @@ combo to one model:
   only shows an inert one. Where members advertise `reasoning_levels`, Pi's
   levels map onto that union; when none advertise a ladder the map is omitted
   so every level stays selectable.
+- **Surface** — each combo rides the API its membership implies:
+  **Anthropic messages** for Claude-only combos, **[OI] responses** for
+  GPT-only combos, and **chat completions** for everything else — including
+  combos that mix both native families. Family is decided from the model name,
+  not the serving prefix.
 - **Cost** — per-direction minimum of resolvable members' *official* rates
-  (see below). `cacheRead`/`cacheWrite` are shown as `0`: the catalog carries
-  no per-combo cache pricing, and none is fabricated.
+  (see below). Cache reads bill at **0.1x the input rate** (owner-confirmed);
+  cache writes are left at `0` because no write rate is published.
 
 Member resolution is conservative but forgiving: a member resolves directly
 from `/v1/models` when its prefixed row carries data; otherwise it joins the
@@ -129,6 +134,27 @@ The per-model cost is an **upper-bound estimate**: the cheapest resolvable
 member's *official* list rates (`official_in` / `official_out`) per direction.
 InferHub's marketplace bills below list, so the real `usage.cost` reported per
 request comes in **at or under** the displayed estimate.
+
+Cached input is priced at **0.1x the input rate**, the rate InferHub charges
+(confirmed by its owner). On the Anthropic surface this is not theoretical:
+sending the same prefix twice cut a request's real cost by roughly 16x in
+testing, because the second call billed its 1218-token prefix as a cache read
+instead of fresh input.
+
+## Surfaces
+
+InferHub exposes three compatible APIs. The extension picks per model:
+
+| membership | API | endpoint |
+|---|---|---|
+| Claude models only | Anthropic messages | `api.inferhub.dev/v1/messages` |
+| GPT models only | [OI] responses | `api.inferhub.dev/v1/responses` |
+| both families, or neither | chat completions | `api.inferhub.dev/v1/chat/completions` |
+
+This buys native behaviour where it is unambiguous: structured thinking
+control, `cache_control` breakpoints, and the responses surface's typed tool
+calls. Mixed combos deliberately fall back to chat completions, which InferHub
+translates for every model.
 
 ## Design rationale
 

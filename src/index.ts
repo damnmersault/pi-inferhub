@@ -1,7 +1,7 @@
-import { createProvider, type Provider } from "@earendil-works/pi-ai";
+import { createProvider, type Api, type Provider } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 // Pi's extension loader doesn't virtualize lazy API implementation subpaths yet
-import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
+import { anthropicMessagesApi, openAICompletionsApi, openAIResponsesApi } from "@earendil-works/pi-ai/compat";
 import { inferhubApiKeyAuth, loginInferhub } from "./auth.js";
 import { fetchComboCatalog } from "./catalog.js";
 import { type InferhubConfig, loadInferhubConfig } from "./config.js";
@@ -23,9 +23,9 @@ export interface InferhubRegistrationOptions {
 	loadConfig?: () => InferhubConfig;
 }
 
-function inferhubProvider(options: InferhubRegistrationOptions = {}): Provider<"openai-completions"> {
+function inferhubProvider(options: InferhubRegistrationOptions = {}): Provider<Api> {
 	const loadConfig = options.loadConfig ?? (() => loadInferhubConfig());
-	return createProvider({
+	return createProvider<Api>({
 		id: PROVIDER_NAME,
 		name: PROVIDER_DISPLAY_NAME,
 		baseUrl: INFERENCE_BASE_URL,
@@ -45,7 +45,15 @@ function inferhubProvider(options: InferhubRegistrationOptions = {}): Provider<"
 			if (!token) return [];
 			return fetchComboCatalog(token, context.signal, { publishUpstream: loadConfig().publishUpstream });
 		},
-		api: openAICompletionsApi(),
+		api: {
+			// Combos carry the surface their membership selects: anthropic-messages
+			// for Claude-only, openai-responses for GPT-only, chat completions for
+			// everything else (including mixed membership). createProvider
+			// dispatches on model.api.
+			"openai-completions": openAICompletionsApi(),
+			"openai-responses": openAIResponsesApi(),
+			"anthropic-messages": anthropicMessagesApi(),
+		},
 	});
 }
 

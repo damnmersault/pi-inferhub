@@ -1,4 +1,4 @@
-import type { ModelsPublication, Provider, RefreshModelsContext } from "@earendil-works/pi-ai";
+import { normalizeContext, type ModelsPublication, type Provider, type RefreshModelsContext } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { inferhubApiKeyAuth, loginInferhub } from "../src/auth.js";
@@ -114,6 +114,69 @@ describe("registerInferhubProvider", () => {
 		// Combos stay first; direct-selectable upstream rows follow.
 		expect(providers.get("inferhub")!.getModels().map((m) => m.id)).toEqual(["combo/test-combo", "croc/glm-5.3"]);
 		expect((publications.at(-1)?.persist?.models ?? []).map((m) => m.id)).toEqual(["combo/test-combo", "croc/glm-5.3"]);
+	});
+
+	it("dispatches each model's surface to its own endpoint", async () => {
+		const { pi, providers } = registrationHarness();
+		registerInferhubProvider(pi, { loadConfig: () => ({ publishUpstream: true, issues: [] }) });
+		const urls: string[] = [];
+		const claude = "cc/" + "claude" + "-opus-5-5";
+		const gpt = "cx/gpt-6-astra";
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (url: string) => {
+				urls.push(String(url));
+				const u = String(url);
+				if (u.endsWith("/combos")) {
+					return new Response(
+						JSON.stringify([
+							{ id: "a", name: "Claude", slug: "claude", members: [{ kind: "model", model: claude }] },
+							{ id: "b", name: "GPT", slug: "gpt", members: [{ kind: "model", model: gpt }] },
+							{ id: "c", name: "GLM", slug: "glm", members: [{ kind: "model", model: "zai/glm-5.3" }] },
+						]),
+						{ status: 200, headers: { "content-type": "application/json" } },
+					);
+				}
+				if (u.endsWith("/models")) {
+					const row = (id: string) => ({ id, modality: "text", input_token_limit: 200_000, max_output_tokens: 32_000 });
+					return new Response(JSON.stringify({ data: [row(claude), row(gpt), row("zai/glm-5.3")] }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				// Inference probes: the endpoint is what matters, not the body.
+				return new Response(JSON.stringify({ error: { message: "probe" } }), {
+					status: 400,
+					headers: { "content-type": "application/json" },
+				});
+			}),
+		);
+		const { context } = refreshContext();
+		const provider = providers.get("inferhub")!;
+		await provider.refreshModels!(context);
+		const models = provider.getModels();
+		const pick = (api: string) => models.find((m) => m.api === api)!;
+		expect(pick("anthropic-messages").id).toBe("combo/claude");
+		expect(pick("openai-responses").id).toBe("combo/gpt");
+		expect(pick("openai-completions").id).toBe("combo/glm");
+
+		// The request path proves which client pi-ai dispatched to.
+		const sent: Record<string, string> = {};
+		for (const api of ["anthropic-messages", "openai-responses", "openai-completions"] as const) {
+			urls.length = 0;
+			const stream = provider.streamSimple(
+				pick(api),
+				normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] }),
+				{ apiKey: "sk-test", maxTokens: 16 },
+			);
+			for await (const _ of stream) {
+				/* drain */
+			}
+			sent[api] = urls.at(-1) ?? "(none)";
+		}
+		expect(sent["anthropic-messages"]).toContain("/v1/messages");
+		expect(sent["openai-responses"]).toContain("/v1/responses");
+		expect(sent["openai-completions"]).toContain("/v1/chat/completions");
 	});
 
 	it("refreshModels keeps the empty baseline without a credential (no network)", async () => {
