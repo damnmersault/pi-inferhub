@@ -43,6 +43,13 @@ describe("loadInferhubConfig", () => {
 		expect(config.issues.join(" ")).toContain("must be a boolean");
 	});
 
+	it("the suite is hermetic: the default loader never reads the developer's config", () => {
+		// test/setup.ts points PI_AGENT_DIR at a throwaway dir. Without it, a real
+		// ~/.pi/agent/pi-inferhub.json would leak into every test that registers
+		// the provider with default options.
+		expect(loadInferhubConfig().publishUpstream).toBe(false);
+	});
+
 	it("lets INFERHUB_PUBLISH_UPSTREAM override the file in both directions", () => {
 		const off = agentDir({ [CONFIG_FILE_NAME]: JSON.stringify({ publishUpstream: false }) });
 		process.env.INFERHUB_PUBLISH_UPSTREAM = "1";

@@ -180,6 +180,10 @@ and the default kept. Never fatal.
   `catalogToModels` pure functions; `loadInferhubConfig` with a temp agent
   dir; real `createProvider` refresh path in test/index.test.ts with
   injected `fetchImpl`). No seams into internals.
+- **Tests are hermetic about config**: `test/setup.ts` (wired via
+  `vitest.config.ts`) points `PI_AGENT_DIR` at a throwaway dir, so a real
+  `~/.pi/agent/pi-inferhub.json` can never leak into a test. Any test that
+  registers the provider with default options depends on this.
 - Deleting a brief-verbatim test line, or "fixing" a failing test by editing
   the test to fit the code rather than the contract, is not allowed without
   naming the contract being violated.
